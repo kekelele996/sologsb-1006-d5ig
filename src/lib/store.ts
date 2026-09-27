@@ -1,5 +1,5 @@
 import { writable, get } from 'svelte/store'
-import type { Announcement, Cue, CueStatus, DeskState, Reminder, Session, Speaker, Term } from './types'
+import type { Announcement, Cue, CueGroup, CueStatus, DeskState, Reminder, Session, SessionChange, Speaker, Term } from './types'
 
 const STORAGE_KEY = 'conference-cue-desk-v1'
 const speakers: Speaker[] = [
@@ -24,15 +24,15 @@ const terms: Term[] = [
 function initialCues(): Cue[] {
   const now = Date.now()
   return [
-    { id: 'cue-101', speakerId: 'sp-1', text: 'The urban heat island effect is not evenly distributed across a city.', receivedAt: now - 36000, status: 'confirmed', manual: false, offline: false, delaySeconds: 4, duplicateOf: null, followupText: '', tags: ['城市热岛'] },
-    { id: 'cue-102', speakerId: 'sp-1', text: 'Neighborhoods with less tree canopy can be several degrees warmer at night.', receivedAt: now - 19000, status: 'confirmed', manual: false, offline: false, delaySeconds: 6, duplicateOf: null, followupText: '补译：“夜间温差可达数摄氏度。”', tags: ['树冠覆盖率'] },
-    { id: 'cue-103', speakerId: 'sp-1', text: 'Our resilience strategy links cooling corridors with public health investments.', receivedAt: now - 9000, status: 'pending', manual: false, offline: false, delaySeconds: 11, duplicateOf: null, followupText: '', tags: ['韧性', '协同效益'] },
-    { id: 'cue-104', speakerId: 'sp-1', text: 'That data also reveals health equity gaps between districts.', receivedAt: now - 2500, status: 'pending', manual: false, offline: false, delaySeconds: 4, duplicateOf: null, followupText: '', tags: ['健康公平'] }
+    { id: 'cue-101', speakerId: 'sp-1', sessionId: 'se-2', text: 'The urban heat island effect is not evenly distributed across a city.', receivedAt: now - 36000, status: 'confirmed', manual: false, offline: false, delaySeconds: 4, duplicateOf: null, followupText: '', tags: ['城市热岛'] },
+    { id: 'cue-102', speakerId: 'sp-1', sessionId: 'se-2', text: 'Neighborhoods with less tree canopy can be several degrees warmer at night.', receivedAt: now - 19000, status: 'confirmed', manual: false, offline: false, delaySeconds: 6, duplicateOf: null, followupText: '补译：“夜间温差可达数摄氏度。”', tags: ['树冠覆盖率'] },
+    { id: 'cue-103', speakerId: 'sp-1', sessionId: 'se-2', text: 'Our resilience strategy links cooling corridors with public health investments.', receivedAt: now - 9000, status: 'pending', manual: false, offline: false, delaySeconds: 11, duplicateOf: null, followupText: '', tags: ['韧性', '协同效益'] },
+    { id: 'cue-104', speakerId: 'sp-1', sessionId: 'se-2', text: 'That data also reveals health equity gaps between districts.', receivedAt: now - 2500, status: 'pending', manual: false, offline: false, delaySeconds: 4, duplicateOf: null, followupText: '', tags: ['健康公平'] }
   ]
 }
 function demoState(): DeskState {
   return {
-    speakers, sessions, terms, cues: initialCues(), reminders: [], activeCueId: 'cue-103', fontScale: 100,
+    speakers, sessions, agendaDraft: null, terms, cues: initialCues(), reminders: [], activeCueId: 'cue-103', fontScale: 100,
     announcements: [
       { id: 'ann-1', level: 'info', text: '十点整有消防联动测试，请提醒会场人员保持镇定。', visibleOnStage: false, createdAt: new Date().toISOString() },
       { id: 'ann-2', level: 'urgent', text: '请下一位发言人提前到侧台候场。', visibleOnStage: false, createdAt: new Date().toISOString() }
@@ -41,11 +41,17 @@ function demoState(): DeskState {
   }
 }
 function clone<T>(value: T): T { return structuredClone(value) }
+function migrate(state: DeskState): DeskState {
+  const liveId = state.sessions.find(item => item.status === 'live')?.id || state.sessions[0]?.id || ''
+  state.cues.forEach(cue => { if (!cue.sessionId) cue.sessionId = liveId })
+  if (typeof state.agendaDraft === 'undefined') state.agendaDraft = null
+  return state
+}
 function loadState(): DeskState {
   if (typeof localStorage === 'undefined') return demoState()
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
-    return saved ? { ...demoState(), ...JSON.parse(saved), online: navigator.onLine } : demoState()
+    return saved ? migrate({ ...demoState(), ...JSON.parse(saved), online: navigator.onLine }) : demoState()
   } catch { return demoState() }
 }
 const history: DeskState[] = []
@@ -85,10 +91,95 @@ export function addSpeaker() {
   commit(state => state.speakers.push({ id: `sp-${Date.now()}`, name: '新发言人', title: '待填写机构与职务', language: '待设置语言方向', color: '#475569' }))
 }
 export function updateSpeaker(id: string, patch: Partial<Speaker>) { commit(state => { const item = state.speakers.find(row => row.id === id); if (item) Object.assign(item, patch) }) }
-export function addSession() {
-  commit(state => state.sessions.push({ id: `se-${Date.now()}`, order: Math.max(0, ...state.sessions.map(item => item.order)) + 1, time: '11:30', title: '新演讲', speakerId: state.speakers[0]?.id || '', room: '主会场 A', status: 'upcoming' }))
+const SESSION_FIELDS: (keyof Session)[] = ['order', 'time', 'title', 'speakerId', 'room', 'status']
+function ensureDraft(state: DeskState): Session[] {
+  if (!state.agendaDraft) state.agendaDraft = { sessions: clone(state.sessions), savedAt: new Date().toISOString() }
+  return state.agendaDraft.sessions
 }
-export function updateSession(id: string, patch: Partial<Session>) { commit(state => { const item = state.sessions.find(row => row.id === id); if (item) Object.assign(item, patch) }) }
+export function agendaChanges(state: DeskState): SessionChange[] {
+  const draft = state.agendaDraft?.sessions
+  if (!draft) return []
+  const changes: SessionChange[] = []
+  draft.forEach(item => {
+    const base = state.sessions.find(row => row.id === item.id)
+    if (!base) { changes.push({ id: item.id, kind: 'added', fields: [...SESSION_FIELDS] }); return }
+    const fields = SESSION_FIELDS.filter(field => base[field] !== item[field])
+    changes.push({ id: item.id, kind: fields.length ? 'modified' : 'same', fields })
+  })
+  state.sessions.forEach(item => { if (!draft.some(row => row.id === item.id)) changes.push({ id: item.id, kind: 'removed', fields: [] }) })
+  return changes
+}
+export function draftChangeCount(state: DeskState): number { return agendaChanges(state).filter(item => item.kind !== 'same').length }
+function pruneDraft(state: DeskState) {
+  if (state.agendaDraft && !draftChangeCount(state)) state.agendaDraft = null
+}
+function touchDraft(state: DeskState) { if (state.agendaDraft) state.agendaDraft.savedAt = new Date().toISOString() }
+export function updateDraftSession(id: string, patch: Partial<Session>) {
+  commit(state => {
+    const item = ensureDraft(state).find(row => row.id === id)
+    if (item) Object.assign(item, patch)
+    touchDraft(state); pruneDraft(state)
+  })
+}
+export function addDraftSession() {
+  commit(state => {
+    const draft = ensureDraft(state)
+    draft.push({ id: `se-${Date.now()}`, order: Math.max(0, ...draft.map(item => item.order)) + 1, time: '11:30', title: '新演讲', speakerId: state.speakers[0]?.id || '', room: '主会场 A', status: 'upcoming' })
+    touchDraft(state)
+  })
+}
+export function removeDraftSession(id: string): boolean {
+  if (get(desk).cues.some(cue => cue.sessionId === id)) return false
+  commit(state => {
+    const draft = ensureDraft(state)
+    state.agendaDraft!.sessions = draft.filter(item => item.id !== id)
+    touchDraft(state); pruneDraft(state)
+  })
+  return true
+}
+export function restoreDraftSession(id: string) {
+  commit(state => {
+    const base = state.sessions.find(item => item.id === id)
+    if (!base) return
+    const draft = ensureDraft(state)
+    if (!draft.some(item => item.id === id)) draft.push(clone(base))
+    touchDraft(state); pruneDraft(state)
+  })
+}
+export function publishAgenda() {
+  commit(state => {
+    if (!state.agendaDraft) return
+    const next = clone(state.agendaDraft.sessions)
+    const liveOnes = next.filter(item => item.status === 'live').sort((a, b) => a.order - b.order)
+    liveOnes.slice(1).forEach(item => { item.status = 'upcoming' })
+    state.sessions = next
+    state.agendaDraft = null
+  })
+}
+export function discardAgendaDraft() { commit(state => { state.agendaDraft = null }) }
+export function cueGroups(state: DeskState): CueGroup[] {
+  const liveId = state.sessions.find(item => item.status === 'live')?.id
+  const bySession = new Map<string, Cue[]>()
+  state.cues.forEach(cue => {
+    const list = bySession.get(cue.sessionId) || []
+    list.push(cue)
+    bySession.set(cue.sessionId, list)
+  })
+  const groups: CueGroup[] = []
+  bySession.forEach((cues, sessionId) => {
+    const session = state.sessions.find(item => item.id === sessionId)
+    groups.push({
+      sessionId, cues,
+      title: session?.title || '已移除场次',
+      time: session?.time || '--:--',
+      order: session?.order ?? 999,
+      isLive: sessionId === liveId,
+      known: Boolean(session),
+      openCount: cues.filter(cue => cue.status !== 'confirmed').length
+    })
+  })
+  return groups.sort((a, b) => a.order - b.order)
+}
 export function addTerm() { commit(state => state.terms.push({ id: `term-${Date.now()}`, source: 'new term', target: '新术语', note: '', speakerId: state.speakers[0]?.id || '', priority: 'normal' })) }
 export function updateTerm(id: string, patch: Partial<Term>) { commit(state => { const item = state.terms.find(row => row.id === id); if (item) Object.assign(item, patch) }) }
 export function addAnnouncement(text: string, level: Announcement['level']) {
@@ -113,11 +204,17 @@ export function setOnline(online: boolean) {
 }
 export function setLiveSimulation(enabled: boolean) { commit(state => { state.liveSimulation = enabled }) }
 export function setActiveCue(id: string) { commit(state => { state.activeCueId = id }) }
-export function moveCue(direction: 1 | -1) {
+export function moveCue(direction: 1 | -1, scope?: string[]) {
   const state = get(desk)
-  const index = state.cues.findIndex(item => item.id === state.activeCueId)
-  const next = state.cues[index + direction]
-  if (next) setActiveCue(next.id)
+  const pool = scope && scope.length ? scope : state.cues.map(item => item.id)
+  const index = pool.indexOf(state.activeCueId)
+  if (index === -1) {
+    const fallback = direction === 1 ? pool[0] : pool.at(-1)
+    if (fallback) setActiveCue(fallback)
+    return
+  }
+  const next = pool[index + direction]
+  if (next) setActiveCue(next)
 }
 export function setFontScale(scale: number) { commit(state => { state.fontScale = Math.min(150, Math.max(85, scale)) }) }
 
@@ -127,10 +224,11 @@ export function ingestCue(text: string, options: { manual?: boolean; speakerId?:
   commit(state => {
     const existing = state.cues.filter(item => item.text !== trimmed)
     const duplicate = findDuplicate(trimmed, existing)
-    const speakerId = options.speakerId || state.sessions.find(item => item.status === 'live')?.speakerId || state.speakers[0]?.id || ''
+    const liveSession = state.sessions.find(item => item.status === 'live')
+    const speakerId = options.speakerId || liveSession?.speakerId || state.speakers[0]?.id || ''
     const receivedAt = options.receivedAt || Date.now()
     const cue: Cue = {
-      id: `cue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, speakerId, text: trimmed, receivedAt,
+      id: `cue-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, speakerId, sessionId: liveSession?.id || state.sessions[0]?.id || '', text: trimmed, receivedAt,
       status: 'pending', manual: Boolean(options.manual), offline: !state.online, delaySeconds: Math.max(0, Math.round((Date.now() - receivedAt) / 1000)),
       duplicateOf: duplicate?.id || null, followupText: '', tags: detectTerms(trimmed, state.terms)
     }

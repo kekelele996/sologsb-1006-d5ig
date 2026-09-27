@@ -39,6 +39,7 @@ export interface Announcement {
 export interface Cue {
   id: string
   speakerId: string
+  sessionId: string
   text: string
   receivedAt: number
   status: CueStatus
@@ -59,9 +60,33 @@ export interface Reminder {
   acknowledged: boolean
 }
 
+export interface AgendaDraft {
+  sessions: Session[]
+  savedAt: string
+}
+
+export type SessionChangeKind = 'added' | 'modified' | 'removed' | 'same'
+export interface SessionChange {
+  id: string
+  kind: SessionChangeKind
+  fields: (keyof Session)[]
+}
+
+export interface CueGroup {
+  sessionId: string
+  title: string
+  time: string
+  order: number
+  isLive: boolean
+  known: boolean
+  cues: Cue[]
+  openCount: number
+}
+
 export interface DeskState {
   speakers: Speaker[]
   sessions: Session[]
+  agendaDraft: AgendaDraft | null
   terms: Term[]
   announcements: Announcement[]
   cues: Cue[]
