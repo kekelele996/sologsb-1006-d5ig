@@ -38,6 +38,7 @@ export interface Announcement {
 
 export interface Cue {
   id: string
+  sessionId: string
   speakerId: string
   text: string
   receivedAt: number
@@ -62,6 +63,7 @@ export interface Reminder {
 export interface DeskState {
   speakers: Speaker[]
   sessions: Session[]
+  draftSessions: Session[]
   terms: Term[]
   announcements: Announcement[]
   cues: Cue[]

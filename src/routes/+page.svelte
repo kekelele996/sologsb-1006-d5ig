@@ -2,10 +2,11 @@
   import { onMount } from 'svelte'
   import Button from 'flowbite-svelte/Button.svelte'
   import {
-    acknowledgeReminder, addAnnouncement, addSession, addSpeaker, addTerm, canRedo, canUndo, clearDuplicate,
-    deleteCue, desk, getDelay, ingestCue, moveCue, publishAnnouncement, redoDesk, sendReminder, setActiveCue,
+    acknowledgeReminder, addAnnouncement, addDraftSession, addSpeaker, addTerm, agendaChanges, canRedo, canUndo,
+    clearDuplicate, deleteCue, desk, discardAgendaDraft, draftSessionDiffers, getDelay, ingestCue, moveCue,
+    moveDraftSession, publishAgenda, publishAnnouncement, redoDesk, removeDraftSession, sendReminder, setActiveCue,
     setCueStatus, setFontScale, setLiveSimulation, setOnline, speakerName, termTarget, undoDesk, updateCue,
-    updateSession, updateSpeaker, updateTerm
+    updateDraftSession, updateSpeaker, updateTerm
   } from '$lib/store'
   import type { Announcement, Cue, Session, TabId, Term } from '$lib/types'
 
@@ -31,6 +32,8 @@
   let showHelp = false
 
   $: currentSession = $desk.sessions.find(item => item.status === 'live') || $desk.sessions[0]
+  $: liveSessionId = currentSession?.id || ''
+  $: agendaChangeCount = agendaChanges($desk)
   $: activeCue = $desk.cues.find(item => item.id === $desk.activeCueId) || $desk.cues.at(-1)
   $: pendingCount = $desk.cues.filter(item => item.status === 'pending').length
   $: offlineCount = $desk.cues.filter(item => item.offline).length
@@ -39,6 +42,22 @@
   $: activeSpeaker = $desk.speakers.find(item => item.id === activeCue?.speakerId)
   $: activeTerms = $desk.terms.filter(item => item.speakerId === activeCue?.speakerId || activeCue?.tags.includes(item.target))
   $: unreadReminders = $desk.reminders.filter(item => !item.acknowledged)
+  let selectedGroupId = ''
+  $: effectiveGroupId = selectedGroupId || activeCue?.sessionId || liveSessionId
+  $: sessionGroups = (() => {
+    const byId = new Map($desk.sessions.map(item => [item.id, item]))
+    const ids = new Set<string>(byId.keys())
+    $desk.cues.forEach(cue => ids.add(cue.sessionId))
+    return Array.from(ids)
+      .map(id => {
+        const cues = $desk.cues.filter(cue => cue.sessionId === id)
+        return { id, session: byId.get(id), total: cues.length, unconfirmed: cues.filter(cue => cue.status !== 'confirmed').length }
+      })
+      .filter(group => group.total > 0 || group.id === liveSessionId)
+      .sort((a, b) => (a.session?.order ?? 999) - (b.session?.order ?? 999))
+  })()
+  $: selectedGroup = sessionGroups.find(group => group.id === effectiveGroupId)
+  $: visibleCues = $desk.cues.filter(cue => cue.sessionId === effectiveGroupId)
 
   onMount(() => {
     if (typeof navigator !== 'undefined') setOnline(navigator.onLine)
@@ -71,6 +90,21 @@
     setActiveCue(cue.id)
     cueNote = cue.followupText
     followup = ''
+  }
+  function selectGroup(sessionId: string) {
+    selectedGroupId = sessionId
+    const cues = $desk.cues.filter(cue => cue.sessionId === sessionId)
+    const next = cues.find(cue => cue.status !== 'confirmed') || cues[0]
+    if (next) selectCue(next)
+  }
+  function publishAgendaNow() {
+    publishAgenda()
+    selectedGroupId = ($desk.sessions.find(item => item.status === 'live') || $desk.sessions[0])?.id || ''
+    flash('议程已发布：新内容进入新场次，旧场次未确认段落保留在待补组。')
+  }
+  function discardDraft() {
+    discardAgendaDraft()
+    flash('已放弃待发布改动，草稿恢复为现场版本。')
   }
   function confirmActive() {
     if (!activeCue) return
@@ -116,6 +150,9 @@
   function statusLabel(status: Cue['status']) {
     return ({ pending: '待传', confirmed: '已确认', followup: '有补充' })[status]
   }
+  function sessionStatusLabel(status: Session['status']) {
+    return ({ upcoming: '未开始', live: '进行中', done: '已结束' })[status]
+  }
   function handleKeyboard(event: KeyboardEvent) {
     const target = event.target as HTMLElement
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
@@ -150,6 +187,7 @@
           <button class="focus-ring whitespace-nowrap rounded-lg px-4 py-2 text-xs font-bold transition {tab === item[0] ? 'bg-white text-ink shadow' : 'text-slate-300 hover:bg-slate-700'}" aria-current={tab === item[0] ? 'page' : undefined} on:click={() => tab = item[0] as TabId}>
             {item[1]}
             {#if item[0] === 'live' && pendingCount}<span class="ml-2 rounded-full bg-orange-500 px-1.5 py-0.5 text-[10px] text-white">{pendingCount}</span>{/if}
+            {#if item[0] === 'backstage' && agendaChangeCount}<span class="ml-2 rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] text-white">{agendaChangeCount}</span>{/if}
             {#if item[0] === 'offline' && offlineCount}<span class="ml-2 rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] text-white">{offlineCount}</span>{/if}
           </button>
         {/each}
@@ -177,6 +215,7 @@
           <p class="text-[10px] font-black uppercase tracking-[.18em] text-teal-700">当前场次 · {$desk.online ? 'LIVE' : 'OFFLINE MODE'}</p>
           <h1 class="mt-1 text-2xl font-black tracking-tight lg:text-4xl">{currentSession?.title}</h1>
           <p class="mt-2 text-sm text-slate-500">{currentSession?.time} · {currentSession?.room} · {$desk.speakers.find(item => item.id === currentSession?.speakerId)?.name}</p>
+          {#if agendaChangeCount}<p class="mt-2 inline-block rounded-full bg-amber-100 px-3 py-1 text-[11px] font-bold text-amber-800">有 {agendaChangeCount} 项议程改动待发布，现场仍按当前场次进行</p>{/if}
         </div>
         <div class="grid grid-cols-3 gap-2 text-center">
           <div class="rounded-xl border bg-white px-4 py-2"><strong class="block text-xl">{pendingCount}</strong><span class="text-[10px] text-slate-500">待传</span></div>
@@ -196,13 +235,13 @@
               {#each $desk.announcements.filter(item => item.visibleOnStage) as item}
                 <div class="rounded-xl border border-orange-300/30 bg-orange-500/15 p-3"><strong class="text-xs text-orange-200">紧急通知</strong><p class="mt-1 text-lg font-bold">{item.text}</p></div>
               {/each}
-              {#each $desk.cues.filter(item => item.status === 'confirmed').slice(-2) as cue}
+              {#each $desk.cues.filter(item => item.status === 'confirmed' && item.sessionId === liveSessionId).slice(-2) as cue}
                 <div class="rounded-xl bg-white/10 p-3">
                   <div class="mb-1 flex justify-between text-[10px] text-teal-200"><span>{speakerName($desk, cue.speakerId)}</span><span>{formatTime(cue.receivedAt)}</span></div>
                   <p class="text-base leading-relaxed lg:text-lg">{cue.text}</p>
                 </div>
               {/each}
-              {#if !$desk.cues.some(item => item.status === 'confirmed') && !$desk.announcements.some(item => item.visibleOnStage)}
+              {#if !$desk.cues.some(item => item.status === 'confirmed' && item.sessionId === liveSessionId) && !$desk.announcements.some(item => item.visibleOnStage)}
                 <p class="py-5 text-center text-sm text-teal-100/60">确认传译或发布通知后，现场可见内容将在这里出现。</p>
               {/if}
             </div>
@@ -210,11 +249,21 @@
 
           <section class="rounded-2xl border bg-white shadow-sm">
             <div class="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
-              <div><span class="text-[10px] font-black uppercase tracking-[.16em] text-slate-400">后台传译队列</span><h2 class="mt-1 font-bold">待确认与遗漏补充</h2></div>
+              <div><span class="text-[10px] font-black uppercase tracking-[.16em] text-slate-400">后台传译队列</span><h2 class="mt-1 font-bold">待确认与遗漏补充{#if selectedGroup} · {selectedGroup.session?.title || '已移除场次'}{/if}</h2></div>
               <div class="flex items-center gap-3 text-xs text-slate-500"><span>自动接入</span><button type="button" role="switch" aria-label="自动接入现场文字" aria-checked={$desk.liveSimulation} class="focus-ring h-6 w-11 rounded-full p-1 transition {$desk.liveSimulation ? 'bg-teal-600' : 'bg-slate-300'}" on:click={() => setLiveSimulation(!$desk.liveSimulation)}><span class="block h-4 w-4 rounded-full bg-white transition {$desk.liveSimulation ? 'translate-x-5' : ''}"></span></button></div>
             </div>
+            <div class="flex flex-wrap items-center gap-2 border-b px-4 py-3">
+              {#each sessionGroups as group}
+                <button class="focus-ring flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-bold transition {group.id === effectiveGroupId ? 'border-teal-600 bg-teal-50 text-teal-900' : 'border-slate-200 text-slate-600 hover:border-slate-300'}" on:click={() => selectGroup(group.id)}>
+                  <span>{group.session ? `${group.session.time} ${group.session.title}` : '已移除场次'}</span>
+                  {#if group.id === liveSessionId}<span class="rounded-full bg-teal-600 px-1.5 py-0.5 text-[9px] text-white">当前场次</span>
+                  {:else if group.unconfirmed}<span class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] text-amber-800">待补组</span>{/if}
+                  {#if group.unconfirmed}<span class="rounded-full bg-orange-500 px-1.5 py-0.5 text-[9px] text-white">{group.unconfirmed}</span>{/if}
+                </button>
+              {/each}
+            </div>
             <div class="max-h-[600px] space-y-2 overflow-y-auto p-3 scrollbar-thin">
-              {#each $desk.cues as cue, index}
+              {#each visibleCues as cue, index}
                 <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
                 <article role="button" tabindex="0" class="cue-enter cursor-pointer rounded-xl border p-3 transition {cue.id === $desk.activeCueId ? 'border-teal-600 bg-teal-50 shadow-md' : 'border-slate-200 bg-white hover:border-slate-300'}" on:click={() => selectCue(cue)} on:keydown={event => (event.key === 'Enter' || event.key === ' ') && selectCue(cue)}>
                   <div class="flex flex-wrap items-start gap-3">
@@ -240,6 +289,7 @@
                   </div>
                 </article>
               {/each}
+              {#if !visibleCues.length}<p class="py-6 text-center text-xs text-slate-400">该场次暂无队列内容，新接入的文字会进入当前场次。</p>{/if}
             </div>
           </section>
         </div>
@@ -288,33 +338,64 @@
     {/if}
 
     {#if tab === 'backstage'}
-      <div class="mb-5"><p class="text-[10px] font-black uppercase tracking-[.18em] text-teal-700">后台准备内容 · 不会直接显示给现场</p><h1 class="mt-1 text-3xl font-black">议程、发言人与紧急通知</h1></div>
+      <div class="mb-5 flex flex-wrap items-end justify-between gap-4">
+        <div><p class="text-[10px] font-black uppercase tracking-[.18em] text-teal-700">后台准备内容 · 不会直接显示给现场</p><h1 class="mt-1 text-3xl font-black">议程、发言人与紧急通知</h1></div>
+        <div class="flex flex-wrap items-center gap-3 rounded-2xl border bg-white px-4 py-3 shadow-sm">
+          <div class="mr-1">
+            <strong class="block text-sm">{agendaChangeCount ? `${agendaChangeCount} 项待发布改动` : '草稿与现场一致'}</strong>
+            <span class="text-[10px] text-slate-500">发布前，现场继续使用当前场次与队列</span>
+          </div>
+          <Button size="sm" color="light" disabled={!agendaChangeCount} on:click={discardDraft}>放弃改动</Button>
+          <Button size="sm" color="yellow" disabled={!agendaChangeCount} on:click={publishAgendaNow}>发布议程</Button>
+        </div>
+      </div>
       <div class="grid gap-4 xl:grid-cols-[1.3fr_.7fr]">
         <section class="rounded-2xl border bg-white p-4 shadow-sm">
-          <div class="mb-4 flex items-center justify-between"><div><h2 class="font-black">演讲顺序</h2><p class="text-xs text-slate-500">拖动时间、状态或发言人即可更新后台准备内容。</p></div><Button size="sm" on:click={addSession}>新增场次</Button></div>
+          <div class="mb-4 flex items-center justify-between"><div><h2 class="font-black">待发布草稿</h2><p class="text-xs text-slate-500">调整时间、顺序或发言人只写入草稿，点击“发布议程”后才影响现场。</p></div><Button size="sm" on:click={addDraftSession}>新增场次</Button></div>
           <div class="space-y-3">
-            {#each $desk.sessions.sort((a,b) => a.order - b.order) as session}
-              <article class="grid gap-3 rounded-xl border p-3 md:grid-cols-[80px_1fr_190px_120px]">
-                <input class="focus-ring rounded-lg border px-2 py-2 text-sm font-bold" type="time" value={session.time} on:change={event => updateSession(session.id, { time: (event.target as HTMLInputElement).value })} />
-                <div><input class="focus-ring w-full rounded-lg border px-3 py-2 font-bold" value={session.title} on:change={event => updateSession(session.id, { title: (event.target as HTMLInputElement).value })} /><span class="mt-1 block text-[10px] text-slate-500">{session.room}</span></div>
-                <select class="focus-ring rounded-lg border px-2" value={session.speakerId} on:change={event => updateSession(session.id, { speakerId: (event.target as HTMLSelectElement).value })}>{#each $desk.speakers as speaker}<option value={speaker.id}>{speaker.name}</option>{/each}</select>
-                <select class="focus-ring rounded-lg border px-2" value={session.status} on:change={event => updateSession(session.id, { status: (event.target as HTMLSelectElement).value as Session['status'] })}><option value="upcoming">未开始</option><option value="live">进行中</option><option value="done">已结束</option></select>
+            {#each $desk.draftSessions.slice().sort((a, b) => a.order - b.order) as session}
+              <article class="rounded-xl border p-3 {draftSessionDiffers($desk, session.id) ? 'border-amber-300 bg-amber-50/60' : ''}">
+                <div class="grid gap-3 md:grid-cols-[auto_80px_1fr_190px_120px_auto]">
+                  <div class="flex items-center gap-1">
+                    <button class="focus-ring rounded-lg border px-2 py-1 text-xs" aria-label="前移场次" on:click={() => moveDraftSession(session.id, -1)}>↑</button>
+                    <button class="focus-ring rounded-lg border px-2 py-1 text-xs" aria-label="后移场次" on:click={() => moveDraftSession(session.id, 1)}>↓</button>
+                  </div>
+                  <input class="focus-ring rounded-lg border px-2 py-2 text-sm font-bold" type="time" value={session.time} on:change={event => updateDraftSession(session.id, { time: (event.target as HTMLInputElement).value })} />
+                  <div><input class="focus-ring w-full rounded-lg border px-3 py-2 font-bold" value={session.title} on:change={event => updateDraftSession(session.id, { title: (event.target as HTMLInputElement).value })} /><span class="mt-1 block text-[10px] text-slate-500">{session.room}</span></div>
+                  <select class="focus-ring rounded-lg border px-2" value={session.speakerId} on:change={event => updateDraftSession(session.id, { speakerId: (event.target as HTMLSelectElement).value })}>{#each $desk.speakers as speaker}<option value={speaker.id}>{speaker.name}</option>{/each}</select>
+                  <select class="focus-ring rounded-lg border px-2" value={session.status} on:change={event => updateDraftSession(session.id, { status: (event.target as HTMLSelectElement).value as Session['status'] })}><option value="upcoming">未开始</option><option value="live">进行中</option><option value="done">已结束</option></select>
+                  <button class="focus-ring self-center rounded-lg border px-2 py-1 text-xs text-red-700" aria-label="删除场次" on:click={() => removeDraftSession(session.id)}>×</button>
+                </div>
+                {#if draftSessionDiffers($desk, session.id)}<span class="mt-2 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">待发布</span>{/if}
               </article>
             {/each}
           </div>
         </section>
-        <section class="rounded-2xl border bg-white p-4 shadow-sm">
-          <div class="mb-4 flex items-center justify-between"><div><h2 class="font-black">发言人</h2><p class="text-xs text-slate-500">语气、语言方向与标识颜色。</p></div><Button size="sm" color="light" on:click={addSpeaker}>新增</Button></div>
-          <div class="space-y-3">
-            {#each $desk.speakers as speaker}
-              <div class="rounded-xl border p-3">
-                <div class="flex items-center gap-2"><input class="focus-ring h-8 w-8 rounded-lg border-0 p-1" type="color" value={speaker.color} aria-label="标识颜色" on:change={event => updateSpeaker(speaker.id, { color: (event.target as HTMLInputElement).value })} /><input class="focus-ring min-w-0 flex-1 rounded-lg border px-3 py-2 font-bold" value={speaker.name} on:change={event => updateSpeaker(speaker.id, { name: (event.target as HTMLInputElement).value })} /></div>
-                <input class="focus-ring mt-2 w-full rounded-lg border px-3 py-2 text-xs" value={speaker.title} on:change={event => updateSpeaker(speaker.id, { title: (event.target as HTMLInputElement).value })} />
-                <input class="focus-ring mt-2 w-full rounded-lg border px-3 py-2 text-xs" value={speaker.language} on:change={event => updateSpeaker(speaker.id, { language: (event.target as HTMLInputElement).value })} />
-              </div>
-            {/each}
-          </div>
-        </section>
+        <div class="space-y-4">
+          <section class="rounded-2xl border bg-white p-4 shadow-sm">
+            <div class="mb-4"><h2 class="font-black">现场版本</h2><p class="text-xs text-slate-500">当前对现场生效的议程，发布草稿后才会被替换。</p></div>
+            <div class="space-y-2">
+              {#each $desk.sessions.slice().sort((a, b) => a.order - b.order) as session}
+                <div class="flex items-center justify-between gap-3 rounded-xl border p-3 {session.status === 'live' ? 'border-teal-300 bg-teal-50' : ''}">
+                  <div><strong class="block text-sm">{session.time} · {session.title}</strong><span class="text-[10px] text-slate-500">{speakerName($desk, session.speakerId)} · {session.room}</span></div>
+                  <span class="shrink-0 rounded-full px-2 py-1 text-[10px] font-bold {session.status === 'live' ? 'bg-teal-600 text-white' : session.status === 'done' ? 'bg-slate-100 text-slate-500' : 'bg-blue-100 text-blue-800'}">{sessionStatusLabel(session.status)}</span>
+                </div>
+              {/each}
+            </div>
+          </section>
+          <section class="rounded-2xl border bg-white p-4 shadow-sm">
+            <div class="mb-4 flex items-center justify-between"><div><h2 class="font-black">发言人</h2><p class="text-xs text-slate-500">语气、语言方向与标识颜色。</p></div><Button size="sm" color="light" on:click={addSpeaker}>新增</Button></div>
+            <div class="space-y-3">
+              {#each $desk.speakers as speaker}
+                <div class="rounded-xl border p-3">
+                  <div class="flex items-center gap-2"><input class="focus-ring h-8 w-8 rounded-lg border-0 p-1" type="color" value={speaker.color} aria-label="标识颜色" on:change={event => updateSpeaker(speaker.id, { color: (event.target as HTMLInputElement).value })} /><input class="focus-ring min-w-0 flex-1 rounded-lg border px-3 py-2 font-bold" value={speaker.name} on:change={event => updateSpeaker(speaker.id, { name: (event.target as HTMLInputElement).value })} /></div>
+                  <input class="focus-ring mt-2 w-full rounded-lg border px-3 py-2 text-xs" value={speaker.title} on:change={event => updateSpeaker(speaker.id, { title: (event.target as HTMLInputElement).value })} />
+                  <input class="focus-ring mt-2 w-full rounded-lg border px-3 py-2 text-xs" value={speaker.language} on:change={event => updateSpeaker(speaker.id, { language: (event.target as HTMLInputElement).value })} />
+                </div>
+              {/each}
+            </div>
+          </section>
+        </div>
       </div>
     {/if}
 
